@@ -96,7 +96,7 @@ class CfgBuiltinKeymaps:
     EndOfCh: Tuple[int, ...] = (curses.KEY_END,)
     TableOfContents: Tuple[int, ...] = (9, ord("\t"))
     Follow: Tuple[int, ...] = (10,)
-    Quit: Tuple[int, ...] = (3, 27, 304)
+    Quit: Tuple[int, ...] = (3, 304)
 
 
 @dataclass(frozen=True)
