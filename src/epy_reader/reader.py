@@ -10,6 +10,11 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+if sys.platform != "win32":
+    import termios
+    import tty
+else:
+    termios = None  # type: ignore
 import uuid
 import xml.etree.ElementTree as ET
 from html import unescape
@@ -245,6 +250,84 @@ class Reader:
         finally:
             os.remove(path)
         return k
+
+    def show_ascii_image(self, bstr):
+        """Display image as ANSI art using chafa, centered on screen."""
+        if termios is None:
+            return NoUpdate()
+
+        rows, cols = self.screen.getmaxyx()
+
+        # Create temp file for the image
+        fd, path = tempfile.mkstemp(suffix=".png")
+        try:
+            with os.fdopen(fd, "wb") as tmp:
+                tmp.write(bstr)
+
+            # Exit curses temporarily to display ANSI image
+            curses.endwin()
+
+            try:
+                # Use chafa to generate ANSI art, capture stdout
+                result = subprocess.run(
+                    [
+                        "chafa",
+                        "--scale=max",
+                        "--view-size={}x{}".format(cols, rows - 4),
+                        path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                art_lines = result.stdout.rstrip("\n").split("\n")
+
+                # Strip leading/trailing blank lines (but keep interior ones),
+                # then center each line horizontally.
+                ansi_re = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
+                start = 0
+                end = len(art_lines)
+                while start < end and not art_lines[start].strip():
+                    start += 1
+                while end > start and not art_lines[end - 1].strip():
+                    end -= 1
+                art_lines = art_lines[start:end]
+
+                vert_pad = max(1, (rows - 2 - len(art_lines)) // 2)
+                centered_lines = []
+                for line in art_lines:
+                    visible = ansi_re.sub('', line)
+                    pad = max(0, (cols - len(visible)) // 2)
+                    centered_lines.append(' ' * pad + line)
+
+                # Clear screen, print vertical padding, then centered art
+                print("\033[2J\033[H", end="", flush=True)
+                print('\n' * vert_pad, end="")
+                print('\n'.join(centered_lines))
+
+                # Print hint message
+                print("\n" + "[Press any key to return]".center(cols))
+
+                # Wait for user input
+                sys.stdout.flush()
+
+                fd_stdin = sys.stdin.fileno()
+                old_settings = termios.tcgetattr(fd_stdin)
+                try:
+                    tty.setraw(fd_stdin)
+                    ch = sys.stdin.read(1)
+                finally:
+                    termios.tcsetattr(fd_stdin, termios.TCSADRAIN, old_settings)
+            finally:
+                # Always restore curses before returning, even if chafa fails
+                print("\033[2J\033[H", end="", flush=True)
+                curses.reset_prog_mode()
+                self.screen.refresh()
+
+        finally:
+            os.remove(path)
+
+        return NoUpdate()
 
     def show_loader(self, *, loader_str: str = "\u231B", subtext: Optional[str] = None):
         self.screen.clear()
@@ -1237,78 +1320,87 @@ class Reader:
                             # y = ret_object
                             reading_state = ret_object
 
-                    elif k in self.keymap.OpenImage and self.image_viewer:
-                        imgs_in_screen = list(
-                            set(
-                                range(reading_state.row, reading_state.row + rows * self.spread + 1)
-                            )
-                            & set(text_structure.image_maps.keys())
-                        )
-                        if not imgs_in_screen:
-                            k = NoUpdate()
-                            continue
+                    elif k in self.keymap.ShowAsciiImage + self.keymap.OpenImage:
+                        # Handle both ASCII image display (o) and external viewer (O)
+                        use_ascii = k in self.keymap.ShowAsciiImage
+                        use_external = k in self.keymap.OpenImage and self.image_viewer
 
-                        imgs_in_screen.sort()
-                        image_path: Optional[str] = None
-                        if len(imgs_in_screen) == 1:
-                            image_path = text_structure.image_maps[imgs_in_screen[0]]
-                        elif len(imgs_in_screen) > 1:
-                            imgs_rel_to_row = [i - reading_state.row for i in imgs_in_screen]
-                            p: Union[NoUpdate, Key] = NoUpdate()
-                            i = 0
-                            while p not in self.keymap.Quit and p not in self.keymap.Follow:
-                                self.screen.move(
-                                    imgs_rel_to_row[i] % rows,
-                                    (
-                                        x
-                                        if imgs_rel_to_row[i] // rows == 0
-                                        else cols
-                                        - DoubleSpreadPadding.RIGHT.value
-                                        - reading_state.textwidth
-                                    )
-                                    + reading_state.textwidth // 2,
+                        if use_external or use_ascii:
+                            imgs_in_screen = list(
+                                set(
+                                    range(reading_state.row, reading_state.row + rows * self.spread + 1)
                                 )
-                                self.screen.refresh()
-                                safe_curs_set(2)
-                                p = board.getch()
-                                if p in self.keymap.ScrollDown:
-                                    i += 1
-                                elif p in self.keymap.ScrollUp:
-                                    i -= 1
-                                i = i % len(imgs_rel_to_row)
-
-                            safe_curs_set(0)
-                            if p in self.keymap.Follow:
-                                image_path = text_structure.image_maps[imgs_in_screen[i]]
-
-                        if image_path:
-                            try:
-                                # if self.ebook.__class__.__name__ in {"Epub", "Mobi", "Azw"}:
-                                if isinstance(self.ebook, (Epub, Mobi, Azw)):
-                                    # self.seamless adjustment
-                                    if self.seamless:
-                                        current_content_index = (
-                                            self.convert_absolute_reading_state_to_relative(
-                                                reading_state
-                                            ).content_index
-                                        )
-                                    else:
-                                        current_content_index = reading_state.content_index
-                                        # for n, content in enumerate(self.ebook.contents):
-                                        #     content_path = content
-                                        #     if reading_state.row < sum(totlines_per_content[:n]):
-                                        #         break
-
-                                    content_path = self.ebook.contents[current_content_index]
-                                    assert isinstance(content_path, str)
-                                    image_path = resolve_path(content_path, image_path)
-                                imgnm, imgbstr = self.ebook.get_img_bytestr(image_path)
-                                k = self.open_image(board, imgnm, imgbstr)
+                                & set(text_structure.image_maps.keys())
+                            )
+                            if not imgs_in_screen:
+                                k = NoUpdate()
                                 continue
-                            except Exception as e:
-                                self.show_win_error("Error Opening Image", str(e), tuple())
-                                if DEBUG:
-                                    raise e
+
+                            imgs_in_screen.sort()
+                            image_path: Optional[str] = None
+                            if len(imgs_in_screen) == 1:
+                                image_path = text_structure.image_maps[imgs_in_screen[0]]
+                            elif len(imgs_in_screen) > 1:
+                                imgs_rel_to_row = [i - reading_state.row for i in imgs_in_screen]
+                                p: Union[NoUpdate, Key] = NoUpdate()
+                                i = 0
+                                while p not in self.keymap.Quit and p not in self.keymap.Follow:
+                                    self.screen.move(
+                                        imgs_rel_to_row[i] % rows,
+                                        (
+                                            x
+                                            if imgs_rel_to_row[i] // rows == 0
+                                            else cols
+                                            - DoubleSpreadPadding.RIGHT.value
+                                            - reading_state.textwidth
+                                        )
+                                        + reading_state.textwidth // 2,
+                                    )
+                                    self.screen.refresh()
+                                    safe_curs_set(2)
+                                    p = board.getch()
+                                    if p in self.keymap.ScrollDown:
+                                        i += 1
+                                    elif p in self.keymap.ScrollUp:
+                                        i -= 1
+                                    i = i % len(imgs_rel_to_row)
+
+                                safe_curs_set(0)
+                                if p in self.keymap.Follow:
+                                    image_path = text_structure.image_maps[imgs_in_screen[i]]
+
+                            if image_path:
+                                try:
+                                    # if self.ebook.__class__.__name__ in {"Epub", "Mobi", "Azw"}:
+                                    if isinstance(self.ebook, (Epub, Mobi, Azw)):
+                                        # self.seamless adjustment
+                                        if self.seamless:
+                                            current_content_index = (
+                                                self.convert_absolute_reading_state_to_relative(
+                                                    reading_state
+                                                ).content_index
+                                            )
+                                        else:
+                                            current_content_index = reading_state.content_index
+                                            # for n, content in enumerate(self.ebook.contents):
+                                            #     content_path = content
+                                            #     if reading_state.row < sum(totlines_per_content[:n]):
+                                            #         break
+
+                                        content_path = self.ebook.contents[current_content_index]
+                                        assert isinstance(content_path, str)
+                                        image_path = resolve_path(content_path, image_path)
+                                    imgnm, imgbstr = self.ebook.get_img_bytestr(image_path)
+
+                                    if use_ascii:
+                                        k = self.show_ascii_image(imgbstr)
+                                    else:
+                                        k = self.open_image(board, imgnm, imgbstr)
+                                    continue
+                                except Exception as e:
+                                    self.show_win_error("Error Opening Image", str(e), tuple())
+                                    if DEBUG:
+                                        raise e
 
                     elif (
                         k in self.keymap.SwitchColor

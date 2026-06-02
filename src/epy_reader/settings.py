@@ -71,7 +71,8 @@ class CfgDefaultKeymaps:
     DefineWord: str = "d"
     TableOfContents: str = "t"
     Follow: str = "f"
-    OpenImage: str = "o"
+    ShowAsciiImage: str = "o"
+    OpenImage: str = "O"
     RegexSearch: str = "/"
     ShowHideProgress: str = "s"
     MarkPosition: str = "m"
@@ -117,6 +118,7 @@ class Keymap:
     Metadata: Tuple[Key, ...]
     NextChapter: Tuple[Key, ...]
     OpenImage: Tuple[Key, ...]
+    ShowAsciiImage: Tuple[Key, ...]
     PageDown: Tuple[Key, ...]
     PageUp: Tuple[Key, ...]
     PrevChapter: Tuple[Key, ...]
