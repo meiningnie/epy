@@ -1,6 +1,7 @@
 import copy
 import curses
 import dataclasses
+import json
 import multiprocessing
 import os
 import re
@@ -10,12 +11,15 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import textwrap
+import threading
 if sys.platform != "win32":
     import termios
     import tty
 else:
     termios = None  # type: ignore
 import uuid
+import urllib.request
 import xml.etree.ElementTree as ET
 from html import unescape
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -24,7 +28,7 @@ import epy_reader.settings as settings
 from epy_reader.board import InfiniBoard
 from epy_reader.config import Config
 from epy_reader.ebooks import Azw, Ebook, Epub, Mobi
-from epy_reader.lib import resolve_path
+from epy_reader.lib import resolve_path, tuple_subtract
 from epy_reader.models import (
     Direction,
     InlineStyle,
@@ -49,7 +53,9 @@ from epy_reader.utils import (
     find_current_content_index,
     get_ebook_obj,
     merge_text_structures,
+    pgdn,
     pgend,
+    pgup,
     safe_curs_set,
     text_win,
 )
@@ -411,6 +417,189 @@ class Reader:
             return "Definition: " + word.upper(), out.decode(), self.keymap.DefineWord
         else:
             return "Error: " + self.ext_dict_app, err.decode(), self.keymap.DefineWord
+
+    def _get_translation_system_prompt(self) -> str:
+        default_prompt = (
+            "你是多语言翻译助手，接收任意语种的单词、短语、句子、段落，"
+            "精准译为通顺中文，仅输出译文，不额外解释、补充内容。"
+        )
+        try:
+            config_path = os.path.expanduser("~/.config/epy/configuration.json")
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                if (
+                    isinstance(config, dict)
+                    and "translation" in config
+                    and isinstance(config["translation"], dict)
+                    and "system_prompt" in config["translation"]
+                ):
+                    return config["translation"]["system_prompt"]
+        except Exception:
+            pass
+        return default_prompt
+
+    def smart_translate(self, text: str):
+        xm_key = os.environ.get("XM_KEY")
+        xm_mod = os.environ.get("XM_MOD")
+        xm_url = os.environ.get("XM_URL")
+
+        rows, cols = self.screen.getmaxyx()
+
+        if not xm_key or not xm_mod or not xm_url:
+            # Show error in loading window style
+            hi, wi = 7, 40
+            Y, X = (rows - hi) // 2, (cols - wi) // 2
+            loadwin = curses.newwin(hi, wi, Y, X)
+            loadwin.box()
+            loadwin.addstr((hi - 3) // 2, (wi - 27) // 2, "Missing environment variables:")
+            loadwin.addstr((hi - 1) // 2, (wi - 25) // 2, "XM_URL, XM_MOD, XM_KEY")
+            loadwin.refresh()
+            ch = NoUpdate()
+            while ch not in self.keymap.Quit + self.keymap.SmartTranslate:
+                ch = Key(loadwin.getch())
+            loadwin.clear()
+            loadwin.refresh()
+            return NoUpdate()
+
+        if not xm_url.endswith("/v1/chat/completions"):
+            if xm_url.endswith("/"):
+                api_url = xm_url + "v1/chat/completions"
+            else:
+                api_url = xm_url + "/v1/chat/completions"
+
+        system_prompt = self._get_translation_system_prompt()
+
+        # Show loading indicator
+        hi, wi = 5, 20
+        Y, X = (rows - hi) // 2, (cols - wi) // 2
+        loadwin = curses.newwin(hi, wi, Y, X)
+        loadwin.box()
+        loadwin.addstr((hi - 1) // 2, (wi - 14) // 2, "Translating...")
+        loadwin.refresh()
+
+        # Fetch API in background thread while loading window is visible
+        result = {"text": "", "error": None}
+
+        def _fetch():
+            try:
+                payload = json.dumps({
+                    "model": xm_mod,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": text},
+                    ],
+                    "stream": False,
+                    "max_tokens": 8192,
+                }).encode("utf-8")
+
+                req = urllib.request.Request(
+                    api_url,
+                    data=payload,
+                    headers={
+                        "Authorization": f"Bearer {xm_key}",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+
+                response = urllib.request.urlopen(req, timeout=120)
+                body = json.loads(response.read())
+                full_text = body["choices"][0]["message"]["content"]
+                result["text"] = full_text if full_text else "(empty response)"
+
+            except Exception as e:
+                result["error"] = "Error: " + str(e)
+
+        t = threading.Thread(target=_fetch, daemon=True)
+        t.start()
+
+        # Poll quit key during loading
+        self.screen.timeout(100)
+        while t.is_alive():
+            try:
+                ch = self.screen.getch()
+                if ch >= 0 and Key(ch) in self.keymap.Quit:
+                    self.screen.timeout(-1)
+                    loadwin.clear()
+                    loadwin.refresh()
+                    return NoUpdate()
+            except curses.error:
+                pass
+        self.screen.timeout(-1)
+        t.join(timeout=2)
+
+        loadwin.clear()
+        loadwin.refresh()
+
+        # Clear leftover input
+        curses.flushinp()
+
+        # Build display text
+        display_text = result["error"] if result["error"] else result["text"]
+
+        # Use @text_win pattern: create window, populate pad, then refresh BOTH
+        textwin = curses.newwin(rows - 4, cols - 4, 2, 2)
+        if self.is_color_supported:
+            textwin.bkgd(self.screen.getbkgd())
+
+        title = "Translate: " + text[:cols - 14]
+        if len(title) > cols - 8:
+            title = title[:cols - 8]
+
+        texts = []
+        for line in display_text.splitlines():
+            texts += textwrap.wrap(line, cols - 10, drop_whitespace=False)
+        if not texts:
+            texts = [""]
+
+        textwin.box()
+        textwin.keypad(True)
+        textwin.addstr(1, 2, title)
+        textwin.addstr(2, 2, "-" * len(title))
+
+        totlines = len(texts)
+        pad = curses.newpad(totlines, cols - 6)
+        if self.is_color_supported:
+            pad.bkgd(self.screen.getbkgd())
+        pad.keypad(True)
+        for n, line in enumerate(texts):
+            pad.addstr(n, 0, line)
+
+        y = 0
+        padhi = rows - 8 - 2  # rows - 4 (window height) - 4 (title area) = rows - 8, minus Y offset
+        textwin.refresh()
+        pad.refresh(y, 0, 6, 5, rows - 5, cols - 5)
+
+        key_textw: Union[NoUpdate, Key] = NoUpdate()
+        while key_textw not in self.keymap.Quit + self.keymap.SmartTranslate:
+            if key_textw in self.keymap.ScrollUp and y > 0:
+                y -= 1
+            elif key_textw in self.keymap.ScrollDown and y < totlines - padhi:
+                y += 1
+            elif key_textw in self.keymap.PageUp:
+                y = pgup(y, padhi)
+            elif key_textw in self.keymap.PageDown:
+                y = pgdn(y, totlines, padhi)
+            elif key_textw in self.keymap.BeginningOfCh:
+                y = 0
+            elif key_textw in self.keymap.EndOfCh:
+                y = pgend(totlines, padhi)
+            elif key_textw == Key(curses.KEY_RESIZE):
+                textwin.clear()
+                textwin.refresh()
+                return key_textw
+            elif key_textw in tuple_subtract(self._win_keys, self.keymap.SmartTranslate):
+                textwin.clear()
+                textwin.refresh()
+                return key_textw
+
+            pad.refresh(y, 0, 6, 5, rows - 5, cols - 5)
+            key_textw = Key(textwin.getch())
+
+        textwin.clear()
+        textwin.refresh()
+        return NoUpdate()
 
     def show_win_choices_bookmarks(self):
         idx = 0
@@ -1484,6 +1673,17 @@ class Reader:
                                 continue
                         else:
                             k = word
+                            continue
+
+                    elif k in self.keymap.SmartTranslate:
+                        text = self.input_prompt(" Translate:")
+                        if isinstance(text, str) and text:
+                            result = self.smart_translate(text)
+                            if isinstance(result, Key) and result in self._win_keys:
+                                k = result
+                                continue
+                        else:
+                            k = text
                             continue
 
                     elif k in self.keymap.MarkPosition:

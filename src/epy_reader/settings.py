@@ -69,6 +69,7 @@ class CfgDefaultKeymaps:
     SetWidth: str = "="
     Metadata: str = "M"
     DefineWord: str = "d"
+    SmartTranslate: str = "T"
     TableOfContents: str = "t"
     Follow: str = "f"
     ShowAsciiImage: str = "o"
@@ -130,6 +131,7 @@ class Keymap:
     ShowBookmarks: Tuple[Key, ...]
     ShowHideProgress: Tuple[Key, ...]
     Shrink: Tuple[Key, ...]
+    SmartTranslate: Tuple[Key, ...]
     SwitchColor: Tuple[Key, ...]
     TTSToggle: Tuple[Key, ...]
     TableOfContents: Tuple[Key, ...]
