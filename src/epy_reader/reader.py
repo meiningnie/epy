@@ -278,6 +278,7 @@ class Reader:
                 result = subprocess.run(
                     [
                         "chafa",
+                        "--format=symbols",
                         "--scale=max",
                         "--view-size={}x{}".format(cols, rows - 4),
                         path,
