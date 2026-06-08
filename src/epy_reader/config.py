@@ -12,6 +12,7 @@ class Config(AppData):
     def __init__(self):
         setting_dict = dataclasses.asdict(settings.Settings())
         keymap_dict = dataclasses.asdict(settings.CfgDefaultKeymaps())
+        translation_dict = dataclasses.asdict(settings.CfgTranslation())
         keymap_builtin_dict = dataclasses.asdict(settings.CfgBuiltinKeymaps())
 
         if os.path.isfile(self.filepath):
@@ -19,8 +20,15 @@ class Config(AppData):
                 cfg_user = json.load(f)
             setting_dict = Config.update_dict(setting_dict, cfg_user["Setting"])
             keymap_dict = Config.update_dict(keymap_dict, cfg_user["Keymap"])
+            translation_dict = Config.update_dict(
+                translation_dict, cfg_user.get("Translation", {})
+            )
         else:
-            self.save({"Setting": setting_dict, "Keymap": keymap_dict})
+            self.save({
+                "Setting": setting_dict,
+                "Keymap": keymap_dict,
+                "Translation": translation_dict,
+            })
 
         keymap_dict_tuple = {k: tuple(v) for k, v in keymap_dict.items()}
         keymap_updated = {
@@ -42,7 +50,7 @@ class Config(AppData):
 
     def save(self, cfg_dict):
         with open(self.filepath, "w") as file:
-            json.dump(cfg_dict, file, indent=2)
+            json.dump(cfg_dict, file, indent=2, ensure_ascii=False)
 
     @staticmethod
     def update_dict(

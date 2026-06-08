@@ -72,8 +72,8 @@ class CfgDefaultKeymaps:
     SmartTranslate: str = "T"
     TableOfContents: str = "t"
     Follow: str = "f"
-    ShowAsciiImage: str = "o"
-    OpenImage: str = "O"
+    ShowAsciiImage: str = "O"
+    OpenImage: str = "o"
     RegexSearch: str = "/"
     ShowHideProgress: str = "s"
     MarkPosition: str = "m"
@@ -86,6 +86,14 @@ class CfgDefaultKeymaps:
     TTSToggle: str = "!"
     DoubleSpreadToggle: str = "D"
     Library: str = "R"
+
+
+@dataclass(frozen=True)
+class CfgTranslation:
+    SystemPrompt: str = (
+        "你是多语言翻译助手，接收任意语种的单词、短语、句子、段落，"
+        "精准译为通顺中文，仅输出译文，不额外解释、补充内容。"
+    )
 
 
 @dataclass(frozen=True)

@@ -430,11 +430,11 @@ class Reader:
                     config = json.load(f)
                 if (
                     isinstance(config, dict)
-                    and "translation" in config
-                    and isinstance(config["translation"], dict)
-                    and "system_prompt" in config["translation"]
+                    and "Translation" in config
+                    and isinstance(config["Translation"], dict)
+                    and "SystemPrompt" in config["Translation"]
                 ):
-                    return config["translation"]["system_prompt"]
+                    return config["Translation"]["SystemPrompt"]
         except Exception:
             pass
         return default_prompt
