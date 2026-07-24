@@ -10,7 +10,18 @@ def main():
     # On Windows, calling this method is necessary
     # On Linux/OSX, this method does nothing
     multiprocessing.freeze_support()
-    filepath, dump_only = cli.find_file()
+
+    args = cli.parse_cli_args()
+
+    if args.init:
+        cli.init_setup()
+        sys.exit(0)
+
+    if args.check:
+        ok = cli.check_dependencies()
+        sys.exit(0 if ok else 1)
+
+    filepath, dump_only = cli.find_file(args)
     if dump_only:
         sys.exit(cli.dump_ebook_content(filepath))
 

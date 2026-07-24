@@ -85,15 +85,13 @@ def parse_cli_args() -> argparse.Namespace:
         usage=f"%(prog)s [-h] [-r] [-d] [-v] {positional_arg_help_str}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Read ebook in terminal",
-        epilog=textwrap.dedent(
-            f"""\
+        epilog=textwrap.dedent(f"""\
         examples:
           {prog} /path/to/ebook    read /path/to/ebook file
           {prog} 3                 read #3 file from reading history
           {prog} count monte       read file matching 'count monte'
                                 from reading history
-        """
-        ),
+        """),
     )
     args_parser.add_argument("-r", "--history", action="store_true", help="print reading history")
     args_parser.add_argument("-d", "--dump", action="store_true", help="dump the content of ebook")
@@ -105,6 +103,16 @@ def parse_cli_args() -> argparse.Namespace:
         help="print version and exit",
     )
     args_parser.add_argument(
+        "--init",
+        action="store_true",
+        help="initialize epy dependencies (sdcv, chafa, dictionaries)",
+    )
+    args_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="check epy dependencies and report status",
+    )
+    args_parser.add_argument(
         "ebook",
         action="store",
         nargs="*",
@@ -114,8 +122,7 @@ def parse_cli_args() -> argparse.Namespace:
     return args_parser.parse_args()
 
 
-def find_file() -> Tuple[str, bool]:
-    args = parse_cli_args()
+def find_file(args: argparse.Namespace) -> Tuple[str, bool]:
     state = State()
     cleanup_library(state)
 
@@ -169,3 +176,150 @@ def dump_ebook_content(filepath: str) -> None:
                 sys.stdout.buffer.write((j + "\n\n").encode("utf-8"))
     finally:
         ebook.cleanup()
+
+
+def _count_dicts(dict_dir: str) -> int:
+    """Count how many dictionary subdirectories exist under dict_dir."""
+    if not os.path.isdir(dict_dir):
+        return 0
+    count = 0
+    for entry in os.listdir(dict_dir):
+        subdir = os.path.join(dict_dir, entry)
+        if os.path.isdir(subdir):
+            # A stardict dictionary directory has at least one .ifo file
+            if any(f.endswith(".ifo") for f in os.listdir(subdir)):
+                count += 1
+    return count
+
+
+def check_dependencies() -> bool:
+    """Check all epy dependencies and report status.
+
+    Returns True when all checks pass, False otherwise.
+    """
+    # (label, ok, detail)
+    checks: List[Tuple[str, bool, str]] = []
+
+    # sdcv
+    sdcv_path = shutil.which("sdcv")
+    checks.append(("sdcv (dict client)", bool(sdcv_path), sdcv_path or "not installed"))
+
+    # chafa
+    chafa_path = shutil.which("chafa")
+    checks.append(("chafa (terminal image)", bool(chafa_path), chafa_path or "not installed"))
+
+    # Dictionaries
+    dict_dir = os.path.expanduser("~/.stardict/dic")
+    n_dicts = _count_dicts(dict_dir)
+    if n_dicts:
+        checks.append(("Stardict dictionaries", True, f"~/.stardict/dic/ ({n_dicts})"))
+    else:
+        checks.append(("Stardict dictionaries", False, "not installed"))
+
+    # XM_* env
+    for var in ("XM_KEY", "XM_MOD", "XM_URL"):
+        val = os.environ.get(var)
+        checks.append((var, bool(val), "set" if val else "not set"))
+
+    # Print
+    for name, ok, detail in checks:
+        status = "✅" if ok else "❌"
+        print(f"  {status} {name}: {detail}")
+
+    passed = sum(1 for _, ok, _ in checks if ok)
+    print(f"\nPassed: {passed}/{len(checks)}")
+
+    return passed == len(checks)
+
+
+def _install_system_deps() -> None:
+    """Try to install sdcv and chafa via available system package manager.
+
+    Only installs packages that are not already in PATH.
+    """
+    import subprocess
+
+    missing = []
+    if shutil.which("sdcv") is None:
+        missing.append("sdcv")
+    if shutil.which("chafa") is None:
+        missing.append("chafa")
+
+    if not missing:
+        print("  ✅ sdcv and chafa already installed\n")
+        return
+
+    managers = [
+        (["sudo", "apt-get", "install", "-y"] + missing, "apt"),
+        (["sudo", "yum", "install", "-y"] + missing, "yum"),
+        (["brew", "install"] + missing, "brew"),
+    ]
+
+    for cmd, name in managers:
+        if shutil.which(cmd[0]) is None:
+            continue
+        print(f"  Trying {name} ...")
+        try:
+            subprocess.run(cmd, check=True)
+            print(f"  ✅ {', '.join(missing)} installed via {name}\n")
+            return
+        except subprocess.CalledProcessError:
+            print(f"  ❌ {name} failed\n")
+            return
+        except FileNotFoundError:
+            continue
+
+    print(f"  ⚠️  No supported package manager found. Install {' '.join(missing)} manually.\n")
+
+
+def init_setup() -> None:
+    """Initialize epy: install sdcv + chafa, extract dictionaries, then run check."""
+    import tarfile
+
+    # 1. Install sdcv and chafa via system package manager
+    print("Installing system dependencies (sdcv, chafa) ...")
+    _install_system_deps()
+
+    # 2. Extract dictionaries
+    dict_dir = os.path.expanduser("~/.stardict/dic")
+    if _count_dicts(dict_dir) > 0:
+        print("Dictionaries already installed at ~/.stardict/dic/, skipping.")
+    else:
+        data_dir = os.path.join(os.path.dirname(__file__), "data")
+        dic_tar = os.path.join(data_dir, "dic.tar.gz")
+        if not os.path.isfile(dic_tar):
+            print(f"  ❌ Dictionary archive not found: {dic_tar}")
+        else:
+            print("Extracting dictionaries ...")
+            os.makedirs(dict_dir, exist_ok=True)
+            with tarfile.open(dic_tar, "r:gz") as tar:
+                for member in tar.getmembers():
+                    # Strip top-level 'dic/' prefix so we get
+                    #   ~/.stardict/dic/stardict-XXX/...
+                    # instead of
+                    #   ~/.stardict/dic/dic/stardict-XXX/...
+                    if member.name == "dic" or member.name == "dic/":
+                        continue
+                    if member.name.startswith("dic/"):
+                        member.name = member.name[4:]
+                    tar.extract(member, dict_dir)
+            print("  ✅ Dictionaries extracted to ~/.stardict/dic/\n")
+
+    # 3. Run dependency check to show remaining gaps
+    print("Dependency check:")
+    check_dependencies()
+
+    # 4. Show actionable hints for remaining issues
+    print()
+    has_xm_missing = any(not os.environ.get(v) for v in ("XM_KEY", "XM_MOD", "XM_URL"))
+    if has_xm_missing:
+        print(
+            "To enable smart translation (key: T), add these lines to "
+            "~/.bashrc and run 'source ~/.bashrc':\n"
+        )
+        print('  export XM_KEY="your-api-key"')
+        print('  export XM_MOD="your-model-name"')
+        print('  export XM_URL="https://your-api-endpoint/v1"')
+        print()
+    else:
+        print("All dependencies ready.")
